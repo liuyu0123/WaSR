@@ -110,6 +110,7 @@ python predict_water.py `
     --architecture wasr_resnet50 `
     --weights output_water/logs/water_test_stable/version_0/weights.pth `
     --output_dir output/predictions `
+    --overlay_output_dir output/predictions_mask `
     --num_classes 2 `
     --fp16
 
