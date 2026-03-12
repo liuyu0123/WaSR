@@ -82,3 +82,7 @@ python train_water.py `
     --monitor_metric val/iou/water `
     --workers 1 `
     --no_augmentation
+
+
+#训练问题诊断
+python debug_training.py

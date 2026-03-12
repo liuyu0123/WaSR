@@ -91,18 +91,18 @@ class WaterDataset(torch.utils.data.Dataset):
         return str(self.mask_dir / (base_name + '.png'))
 
     def _read_mask(self, mask_path):
-        """读取mask并转换为二分类格式 (0和1)"""
+        """读取mask并转换为类别索引格式 (0或1)
+        
+        返回:
+            np.ndarray: 形状为 [H, W]，值为 0 (非水) 或 1 (水)
+        """
         mask = np.array(Image.open(mask_path).convert('L'))
         
         # 二值化：>127为1（水），否则为0（非水）
-        # 如果你的mask已经是0和1，这行不会改变值
-        mask = (mask > 127).astype(np.float32)
+        # 注意：这里返回的是单通道 long 类型数据，不是 one-hot
+        mask = (mask > 127).astype(np.int64)
         
-        # 转换为 one-hot 格式: [H, W, 2]
-        # 通道0: 非水背景, 通道1: 水
-        mask = np.stack([1 - mask, mask], axis=-1).astype(np.float32)
-        
-        return mask
+        return mask  # [H, W]
 
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
@@ -110,28 +110,32 @@ class WaterDataset(torch.utils.data.Dataset):
 
         img_name = self.images[idx]
         img_path = self.image_dir / img_name
-        
-        # 读取图像 (RGB)
+
+        # 读取图像
         img = np.array(Image.open(img_path).convert('RGB'))
         img_original = img.copy()
-        
+
         # 查找并读取mask
         mask_path = self._find_mask_path(img_name)
         if not os.path.exists(mask_path):
             raise FileNotFoundError(f"Mask not found: {mask_path}")
         
-        mask = self._read_mask(mask_path)
-        
+        mask = self._read_mask(mask_path)  # 此时形状为 [H, W]
+
         # 数据打包
         data = {
             'image': img,
-            'segmentation': mask  # 使用相同的key 'segmentation' 保持兼容性
+            'segmentation': mask
         }
 
-        # 应用数据增强 (Albumentations)
+        # 应用数据增强
+        # 注意：如果您的 transform 是 Albumentations，请确保它能处理单通道 mask
+        # 通常 Albumentations 的 transform(image=img, mask=mask) 是标准用法
         if self.transform is not None:
             data = self.transform(data)
-            img = data['image']
+        
+        img = data['image']
+        mask = data['segmentation'] # 增强后的 mask，通常仍是 [H, W]
 
         # 应用归一化
         if self.normalize_t is not None:
@@ -148,9 +152,13 @@ class WaterDataset(torch.utils.data.Dataset):
         if self.include_original:
             features['image_original'] = torch.from_numpy(img_original.transpose(2, 0, 1))
 
-        # 分割标签 [H, W, 2] -> [2, H, W]
-        if 'segmentation' in data:
-            labels['segmentation'] = torch.from_numpy(data['segmentation'].transpose(2, 0, 1))
+        # =========== 核心修改处 ===========
+        # 分割标签: [H, W]
+        # 1. 不再做 transpose (因为不再是 [H, W, 2])
+        # 2. 使用 .long() 确保是 CrossEntropyLoss 需要的 int64 类型
+        if mask is not None:
+            labels['segmentation'] = torch.from_numpy(mask).long()
+        # ==================================
 
         # 元数据
         metadata = {
