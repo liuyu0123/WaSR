@@ -148,6 +148,7 @@ def train_water(args):
         batch_size=args.batch_size, 
         shuffle=True,
         num_workers=args.workers, 
+        persistent_workers=args.workers > 0,
         drop_last=True,
         pin_memory=True
     )
@@ -167,6 +168,7 @@ def train_water(args):
             val_ds, 
             batch_size=args.batch_size, 
             num_workers=args.workers,
+            persistent_workers=args.workers > 0,
             pin_memory=True
         )
 
