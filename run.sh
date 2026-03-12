@@ -20,7 +20,7 @@ python predict.py `
     --output_dir output/predictions
 
 
-################################ 水域分割 ##############################
+################################ 水域分割(训练) ##############################
 #模型训练(水域分割)
 python train_water.py `
     --train_config configs/waterseg_train.yaml `
@@ -98,10 +98,12 @@ python train_water.py `
     --water_class_weight 5.0 `
     --freeze_backbone
 
+################################ 水域分割(训练诊断) ##############################
 #训练问题诊断
 python debug_training.py
 
 
+################################ 水域分割(推理) ##############################
 #模型预测(水域分割)
 export CUDA_VISIBLE_DEVICES=0 # GPU to use(linux)
 $env:CUDA_VISIBLE_DEVICES="0"  #(windows)
@@ -115,5 +117,6 @@ python predict_water.py `
     --fp16
 
 
+################################ 水域分割(推理诊断) ##############################
 #模型预测数据检查
 python check_inference.py
