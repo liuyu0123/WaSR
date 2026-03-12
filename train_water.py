@@ -127,6 +127,7 @@ def train_water(args):
 
     # 数据预处理
     normalize_t = PytorchHubNormalization()
+    # normalize_t = None  # 使用默认的 ToTensor (0-1 范围)
 
     # 数据增强
     transform = None

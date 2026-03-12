@@ -69,7 +69,7 @@ python train_water.py `
     --freeze_backbone `
     --no_augmentation
 
-#✅模型训练-加速版(需 train_water.py 脚本配合修改)
+#模型训练-加速版(需 train_water.py 脚本配合修改)
 python train_water.py `
     --train_config configs/waterseg_train.yaml `
     --val_config configs/waterseg_val.yaml `
@@ -83,6 +83,36 @@ python train_water.py `
     --workers 1 `
     --no_augmentation
 
+#✅模型训练-加速版(需 train_water.py 脚本配合修改)-修复版
+python train_water.py `
+    --train_config configs/waterseg_train.yaml `
+    --val_config configs/waterseg_val.yaml `
+    --model_name water_test_stable `
+    --model wasr_resnet50 `
+    --batch_size 4 `
+    --epochs 10 `
+    --precision 16 `
+    --learning_rate 1e-4 `
+    --monitor_metric val/iou/water `
+    --workers 1 `
+    --water_class_weight 5.0 `
+    --freeze_backbone
 
 #训练问题诊断
 python debug_training.py
+
+
+#模型预测(水域分割)
+export CUDA_VISIBLE_DEVICES=0 # GPU to use(linux)
+$env:CUDA_VISIBLE_DEVICES="0"  #(windows)
+python predict_water.py `
+    --image_dir D:/Files/GitProject/BiSeNet-ooooverflow-LY/dataset/water_seg2/test/images `
+    --architecture wasr_resnet50 `
+    --weights output_water/logs/water_test_stable/version_0/weights.pth `
+    --output_dir output/predictions `
+    --num_classes 2 `
+    --fp16
+
+
+#模型预测数据检查
+python check_inference.py
