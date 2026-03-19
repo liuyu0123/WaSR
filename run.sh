@@ -85,8 +85,8 @@ python train_water.py `
 
 #✅模型训练-加速版(需 train_water.py 脚本配合修改)-修复版
 python train_water.py `
-    --train_config configs/waterseg_train.yaml `
-    --val_config configs/waterseg_val.yaml `
+    --train_config configs/IRWSB_train.yaml `
+    --val_config configs/IRWSB_val.yaml `
     --model_name water_test_stable `
     --model wasr_resnet50 `
     --batch_size 4 `
@@ -101,6 +101,8 @@ python train_water.py `
 ################################ 水域分割(训练诊断) ##############################
 #训练问题诊断
 python debug_training.py
+
+################################ 水域分割(模型检测) ##############################
 
 
 ################################ 水域分割(推理) ##############################

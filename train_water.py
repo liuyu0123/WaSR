@@ -1,11 +1,15 @@
 import argparse
 import os
+import csv
+import time
+from pathlib import Path
+
 import torch
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning import loggers as pl_loggers
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, Callback
+import numpy as np
 
 import wasr.models as models
 from wasr.train import LitModel
@@ -14,7 +18,7 @@ from datasets.WaterDataset import WaterDataset
 from datasets.transforms import get_augmentation_transform, PytorchHubNormalization
 
 
-# ============ 针对二分类水分割任务的默认配置 ============
+# 默认配置
 DEVICE_BATCH_SIZE = 4
 NUM_CLASSES = 2
 PATIENCE = 15
@@ -25,11 +29,134 @@ RANDOM_SEED = 42
 OUTPUT_DIR = 'output_water'
 PRETRAINED_DEEPLAB = True
 PRECISION = 32
-# MODEL = 'wasr_resnet101_imu'
 MODEL = 'wasr_resnet101'
-MONITOR_VAR = 'val/iou/obstacle'
+MONITOR_VAR = 'val/iou/water'
 MONITOR_VAR_MODE = 'max'
 
+
+def get_model_info(model):
+    """获取模型静态信息"""
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return {
+        'total_params': total_params,
+        'trainable_params': trainable_params,
+        'model_size_mb': total_params * 4 / (1024 * 1024),
+    }
+
+
+class MetricsCallback(Callback):
+    """自定义回调，记录训练和验证指标到CSV"""
+    
+    def __init__(self, save_path, model_info, args):
+        self.save_path = Path(save_path)
+        self.save_path.parent.mkdir(parents=True, exist_ok=True)
+        self.model_info = model_info
+        self.args = args
+        
+        self.header = [
+            'epoch',
+            'train_loss', 'train_precision', 'train_recall', 'train_f1', 'train_miou',
+            'val_loss', 'val_precision', 'val_recall', 'val_f1', 'val_miou',
+            'inference_time_ms', 'fps', 'learning_rate'
+        ]
+        self.rows = []
+        self.epoch_start_time = None
+        
+    def on_train_epoch_start(self, trainer, pl_module):
+        """记录epoch开始时间"""
+        self.epoch_start_time = time.time()
+        
+    def _get_metric(self, metrics, key_list):
+        """辅助函数：从metrics字典中获取第一个存在的键值"""
+        for key in key_list:
+            if key in metrics:
+                value = metrics[key]
+                if isinstance(value, torch.Tensor):
+                    value = value.item()
+                return value
+        return 0.0
+        
+    def on_validation_epoch_end(self, trainer, pl_module):
+        """验证epoch结束时 - 此时所有指标都已聚合完成"""
+        metrics = trainer.callback_metrics
+        
+        # 获取训练指标（带_epoch后缀，因为是epoch级别聚合的）
+        train_loss = self._get_metric(metrics, ['train/loss_epoch', 'train/loss'])
+        train_precision = self._get_metric(metrics, ['train/precision'])
+        train_recall = self._get_metric(metrics, ['train/recall'])
+        train_f1 = self._get_metric(metrics, ['train/f1'])
+        train_miou = self._get_metric(metrics, ['train/miou', 'train/iou/water_epoch', 'train/iou/water'])
+        
+        # 获取验证指标
+        val_loss = self._get_metric(metrics, ['val/loss'])
+        val_precision = self._get_metric(metrics, ['val/precision'])
+        val_recall = self._get_metric(metrics, ['val/recall'])
+        val_f1 = self._get_metric(metrics, ['val/f1'])
+        val_miou = self._get_metric(metrics, ['val/miou', 'val/iou/water'])
+        
+        # 计算epoch时间和FPS
+        epoch_time = time.time() - self.epoch_start_time if self.epoch_start_time else 0
+        val_loader = trainer.val_dataloaders
+        val_size = len(val_loader.dataset) if val_loader else 0
+        fps = val_size / epoch_time if epoch_time > 0 else 0
+        inference_time_ms = (epoch_time / len(val_loader)) * 1000 if val_loader and len(val_loader) > 0 else 0
+        
+        # 获取当前学习率
+        lr = trainer.optimizers[0].param_groups[0]['lr'] if trainer.optimizers else 0
+        
+        # 记录到CSV
+        row = {
+            'epoch': trainer.current_epoch + 1,
+            'train_loss': f"{train_loss:.6f}",
+            'train_precision': f"{train_precision:.6f}",
+            'train_recall': f"{train_recall:.6f}",
+            'train_f1': f"{train_f1:.6f}",
+            'train_miou': f"{train_miou:.6f}",
+            'val_loss': f"{val_loss:.6f}",
+            'val_precision': f"{val_precision:.6f}",
+            'val_recall': f"{val_recall:.6f}",
+            'val_f1': f"{val_f1:.6f}",
+            'val_miou': f"{val_miou:.6f}",
+            'inference_time_ms': f"{inference_time_ms:.4f}",
+            'fps': f"{fps:.2f}",
+            'learning_rate': f"{lr:.8f}",
+        }
+        self.rows.append(row)
+        
+        # 打印当前epoch摘要
+        print(f"\nEpoch {trainer.current_epoch + 1} Summary:")
+        print(f"  Train Loss: {train_loss:.4f}, Precision: {train_precision:.4f}, Recall: {train_recall:.4f}, F1: {train_f1:.4f}, mIoU: {train_miou:.4f}")
+        print(f"  Val Loss: {val_loss:.4f}, Precision: {val_precision:.4f}, Recall: {val_recall:.4f}, F1: {val_f1:.4f}, mIoU: {val_miou:.4f}, FPS: {fps:.2f}")
+        
+    def on_fit_end(self, trainer, pl_module):
+        """训练结束时保存CSV"""
+        with open(self.save_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=self.header)
+            writer.writeheader()
+            writer.writerows(self.rows)
+        print(f"\nTraining log saved to {self.save_path}")
+        
+    def save_model_info(self):
+        """保存模型信息"""
+        info_path = self.save_path.parent / f"{self.save_path.stem}_model_info.txt"
+        with open(info_path, 'w') as f:
+            f.write(f"Model Type: WaSR\n")
+            f.write(f"Backbone: {self.args.model}\n")
+            f.write(f"Total Parameters: {self.model_info['total_params']:,}\n")
+            f.write(f"Trainable Parameters: {self.model_info['trainable_params']:,}\n")
+            f.write(f"Model Size: {self.model_info['model_size_mb']:.2f} MB\n")
+            f.write(f"Number of Classes: {self.args.num_classes}\n")
+            f.write(f"Batch Size: {self.args.batch_size}\n")
+            f.write(f"Epochs: {self.args.epochs}\n")
+            
+            lr = getattr(self.args, 'lr', None) or getattr(self.args, 'learning_rate', 'N/A')
+            f.write(f"Learning Rate: {lr}\n")
+            
+            optimizer = getattr(self.args, 'optimizer', 'N/A')
+            f.write(f"Optimizer: {optimizer}\n")
+            
+            f.write(f"Pretrained: {self.args.pretrained}\n")
 
 
 def get_arguments(input_args=None):
@@ -100,13 +227,10 @@ def get_arguments(input_args=None):
 
 
 def adapt_pretrained_weights(state_dict, num_classes=2):
-    """
-    将预训练的3类权重适配到2类
-    """
+    """将预训练的3类权重适配到2类"""
     adapted_state_dict = {}
     
     for key, value in state_dict.items():
-        # 跳过最后一层分类器的权重
         if 'classifier' in key or 'fc' in key or 'conv' in key:
             if len(value.shape) > 0 and value.shape[0] == 3:
                 print(f"Skipping {key}: {value.shape} -> adapting to {num_classes} classes")
@@ -127,7 +251,6 @@ def train_water(args):
 
     # 数据预处理
     normalize_t = PytorchHubNormalization()
-    # normalize_t = None  # 使用默认的 ToTensor (0-1 范围)
 
     # 数据增强
     transform = None
@@ -183,6 +306,10 @@ def train_water(args):
         pretrained=args.pretrained
     )
 
+    # 获取模型信息
+    model_info = get_model_info(model)
+    print(f"Model: {model_info['total_params']:,} params, {model_info['model_size_mb']:.2f} MB")
+
     # 加载预训练权重
     if args.pretrained_weights is not None:
         print(f"\nLoading pretrained weights from: {args.pretrained_weights}")
@@ -218,8 +345,17 @@ def train_water(args):
     logger = pl_loggers.TensorBoardLogger(logs_path, args.model_name)
     logger.log_hyperparams(vars(args))
 
+    # 创建CSV记录回调
+    log_filename = f"wasr_{args.model}_training_log_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+    metrics_callback = MetricsCallback(
+        os.path.join(args.output_dir, args.model_name, log_filename),
+        model_info,
+        args
+    )
+    metrics_callback.save_model_info()
+
     # 回调函数
-    callbacks = []
+    callbacks = [metrics_callback]
     
     if args.validation:
         # 早停
@@ -245,7 +381,7 @@ def train_water(args):
         # 模型导出
         callbacks.append(ModelExporter())
 
-    # 处理设备参数 - 适配新版 PyTorch Lightning
+    # 处理设备参数
     if args.gpus == -1:
         num_gpus = torch.cuda.device_count()
         devices = num_gpus if num_gpus > 0 else 1
@@ -263,7 +399,7 @@ def train_water(args):
         accelerator = "gpu"
         strategy = "ddp" if devices > 1 else "auto"
     
-    # 处理 resume_from_checkpoint（新版参数名）
+    # 处理 resume_from_checkpoint
     trainer_kwargs = {
         "logger": logger,
         "accelerator": accelerator,
@@ -280,7 +416,6 @@ def train_water(args):
         "enable_model_summary": True,
     }
     
-    # 处理断点续训
     if args.resume_from is not None:
         trainer_kwargs["ckpt_path"] = args.resume_from
     

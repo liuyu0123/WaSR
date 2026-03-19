@@ -48,17 +48,139 @@ class LitModel(pl.LightningModule):
             self.class_weights[1] = args.water_class_weight
             print(f"Class weights initialized: {self.class_weights.tolist()}")
 
-        # Metrics
+        # Metrics - 训练集和验证集分开
+        self.train_accuracy = PixelAccuracy(num_classes)
         self.val_accuracy = PixelAccuracy(num_classes)
-        # 只创建实际存在的类别的 IoU 指标
+        
+        # IoU 指标
+        self.train_iou_0 = ClassIoU(0, num_classes)
+        self.train_iou_1 = ClassIoU(1, num_classes)
         self.val_iou_0 = ClassIoU(0, num_classes)
         self.val_iou_1 = ClassIoU(1, num_classes)
+        
         if num_classes > 2:
+            self.train_iou_2 = ClassIoU(2, num_classes)
             self.val_iou_2 = ClassIoU(2, num_classes)
+        
+        # 用于计算 Precision, Recall, F1 的混淆矩阵累积
+        # 使用 register_buffer 确保它在正确的设备上
+        self.register_buffer('train_confusion_matrix', torch.zeros(num_classes, num_classes))
+        self.register_buffer('val_confusion_matrix', torch.zeros(num_classes, num_classes))
+
+    def _reset_confusion_matrix(self, stage):
+        """重置混淆矩阵"""
+        cm = getattr(self, f'{stage}_confusion_matrix')
+        cm.zero_()
+
+    def _update_confusion_matrix(self, preds, labels, stage):
+        """更新混淆矩阵"""
+        # preds 和 labels 都是 [B, H, W] 的索引格式
+        cm = getattr(self, f'{stage}_confusion_matrix')
+        
+        # 确保在同一设备上
+        device = cm.device
+        preds = preds.to(device)
+        labels = labels.to(device)
+        
+        # 展平
+        preds_flat = preds.reshape(-1)
+        labels_flat = labels.reshape(-1)
+        
+        # 只计算有效标签
+        valid_mask = (labels_flat >= 0) & (labels_flat < self.num_classes)
+        preds_valid = preds_flat[valid_mask]
+        labels_valid = labels_flat[valid_mask]
+        
+        # 累积到混淆矩阵
+        for t in range(self.num_classes):
+            for p in range(self.num_classes):
+                cm[t, p] += ((labels_valid == t) & (preds_valid == p)).sum()
+
+    def _compute_metrics_from_cm(self, stage):
+        """基于混淆矩阵计算 Precision, Recall, F1"""
+        cm = getattr(self, f'{stage}_confusion_matrix')
+        
+        # 避免除零
+        eps = 1e-7
+        
+        # 对每个类别计算
+        precisions = []
+        recalls = []
+        f1s = []
+        ious = []
+        
+        for c in range(self.num_classes):
+            tp = cm[c, c]  # 真正例
+            fp = cm[:, c].sum() - tp  # 假正例
+            fn = cm[c, :].sum() - tp  # 假反例
+            
+            precision = tp / (tp + fp + eps)
+            recall = tp / (tp + fn + eps)
+            f1 = 2 * precision * recall / (precision + recall + eps)
+            iou = tp / (tp + fp + fn + eps)
+            
+            precisions.append(precision)
+            recalls.append(recall)
+            f1s.append(f1)
+            ious.append(iou)
+        
+        # 返回 water 类（类别1）的指标，以及 mIoU
+        return {
+            'precision': precisions[1].item() if self.num_classes > 1 else 0,
+            'recall': recalls[1].item() if self.num_classes > 1 else 0,
+            'f1': f1s[1].item() if self.num_classes > 1 else 0,
+            'miou': (sum(ious) / len(ious)).item()  # 平均IoU
+        }
 
     def forward(self, x):
         output = self.model(x)
         return output['out']
+
+    def _compute_metrics(self, logits, labels, stage='train'):
+        """计算并记录指标"""
+        # Resize logits to match label size
+        if labels.dim() == 3:
+            # 索引格式 [B, H, W]
+            labels_size = (labels.size(1), labels.size(2))
+            labels_hard = labels
+        else:
+            # One-hot 格式 [B, C, H, W]
+            labels_size = (labels.size(2), labels.size(3))
+            labels_hard = labels.argmax(1)
+
+        logits = TF.resize(logits, labels_size, interpolation=Image.BILINEAR)
+        preds = logits.argmax(1)
+
+        # 根据 stage 选择对应的 metrics
+        if stage == 'train':
+            accuracy_metric = self.train_accuracy
+            iou_0_metric = self.train_iou_0
+            iou_1_metric = self.train_iou_1
+            iou_2_metric = self.train_iou_2 if self.num_classes > 2 else None
+        else:
+            accuracy_metric = self.val_accuracy
+            iou_0_metric = self.val_iou_0
+            iou_1_metric = self.val_iou_1
+            iou_2_metric = self.val_iou_2 if self.num_classes > 2 else None
+
+        # 更新指标
+        accuracy_metric(preds, labels_hard)
+        iou_0_metric(preds, labels_hard)
+        iou_1_metric(preds, labels_hard)
+        
+        # 更新混淆矩阵用于计算 Precision, Recall, F1
+        self._update_confusion_matrix(preds, labels_hard, stage)
+        
+        # 记录指标（step级别）
+        self.log(f'{stage}/accuracy', accuracy_metric, on_step=(stage=='train'), on_epoch=True)
+        self.log(f'{stage}/iou/obstacle', iou_0_metric, on_step=(stage=='train'), on_epoch=True)
+        self.log(f'{stage}/iou/water', iou_1_metric, on_step=(stage=='train'), on_epoch=True)
+        
+        if iou_2_metric is not None:
+            iou_2_metric(preds, labels_hard)
+            self.log(f'{stage}/iou/sky', iou_2_metric, on_step=(stage=='train'), on_epoch=True)
+
+        return preds
 
     def training_step(self, batch, batch_idx):
         features, labels = batch
@@ -76,11 +198,27 @@ class LitModel(pl.LightningModule):
         separation_loss = self.separation_loss_lambda * separation_loss
         loss = fl + separation_loss
 
+        # 计算并记录训练指标
+        with torch.no_grad():
+            self._compute_metrics(out['out'], labels['segmentation'], stage='train')
+
         # log losses
-        self.log('train/loss', loss.item())
-        self.log('train/focal_loss', fl.item())
-        self.log('train/separation_loss', separation_loss.item())
+        self.log('train/loss', loss.item(), on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train/focal_loss', fl.item(), on_step=True, on_epoch=True)
+        self.log('train/separation_loss', separation_loss.item(), on_step=True, on_epoch=True)
         return loss
+    
+    def on_train_epoch_end(self):
+        """训练epoch结束时，计算并记录 Precision, Recall, F1"""
+        metrics = self._compute_metrics_from_cm('train')
+        
+        self.log('train/precision', metrics['precision'], on_epoch=True)
+        self.log('train/recall', metrics['recall'], on_epoch=True)
+        self.log('train/f1', metrics['f1'], on_epoch=True)
+        self.log('train/miou', metrics['miou'], on_epoch=True)
+        
+        # 重置混淆矩阵
+        self._reset_confusion_matrix('train')
 
     def validation_step(self, batch, batch_idx):
         features, labels = batch
@@ -92,38 +230,22 @@ class LitModel(pl.LightningModule):
         
         self.log('val/loss', loss.item())
 
-        # === 关键修正：正确处理索引格式的标签 ===
-        logits = out['out']
-        seg_labels = labels['segmentation']
+        # 计算并记录验证指标
+        self._compute_metrics(out['out'], labels['segmentation'], stage='val')
         
-        # 判断标签格式
-        if seg_labels.dim() == 3:
-            # 索引格式 [B, H, W]
-            labels_size = (seg_labels.size(1), seg_labels.size(2))
-            labels_hard = seg_labels
-        else:
-            # One-hot 格式 [B, C, H, W]
-            labels_size = (seg_labels.size(2), seg_labels.size(3))
-            labels_hard = seg_labels.argmax(1)
-
-        # Resize logits to match label size
-        logits = TF.resize(logits, labels_size, interpolation=Image.BILINEAR)
-        preds = logits.argmax(1)
-
-        # 更新指标
-        self.val_accuracy(preds, labels_hard)
-        self.val_iou_0(preds, labels_hard)
-        self.val_iou_1(preds, labels_hard)
+        return {'loss': loss}
+    
+    def on_validation_epoch_end(self):
+        """验证epoch结束时，计算并记录 Precision, Recall, F1"""
+        metrics = self._compute_metrics_from_cm('val')
         
-        self.log('val/accuracy', self.val_accuracy)
-        self.log('val/iou/obstacle', self.val_iou_0)
-        self.log('val/iou/water', self.val_iou_1)
+        self.log('val/precision', metrics['precision'], on_epoch=True)
+        self.log('val/recall', metrics['recall'], on_epoch=True)
+        self.log('val/f1', metrics['f1'], on_epoch=True)
+        self.log('val/miou', metrics['miou'], on_epoch=True)
         
-        if self.num_classes > 2:
-            self.val_iou_2(preds, labels_hard)
-            self.log('val/iou/sky', self.val_iou_2)
-        
-        return {'loss': loss, 'preds': preds}
+        # 重置混淆矩阵
+        self._reset_confusion_matrix('val')
 
     def configure_optimizers(self):
         # Separate parameters for different LRs
