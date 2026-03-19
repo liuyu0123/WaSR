@@ -103,6 +103,24 @@ python train_water.py `
 python debug_training.py
 
 ################################ 水域分割(模型检测) ##############################
+#自动生成文件名（默认）
+# 输出将保存到 output_water/test_results/test_weights_YYYYMMDD_HHMMSS.csv
+python test_water.py `
+    --model-path output_water/logs/water_test_stable/version_0/weights.pth `
+    --test-images D:\Files\Data\IRWSB\test\images `
+    --test-masks D:\Files\Data\IRWSB\test\masks_white_noSuffix `
+    --model wasr_resnet50 `
+    --batch-size 4 `
+    --workers 1
+#指定保存csv文件名
+python test_water.py `
+    --model-path output_water/logs/water_test_stable/version_0/weights.pth `
+    --test-images D:\Files\Data\IRWSB\test\images `
+    --test-masks D:\Files\Data\IRWSB\test\masks_white_noSuffix `
+    --model wasr_resnet50 `
+    --batch-size 4 `
+    --workers 1 `
+    --output-path output_water\test_result.csv
 
 
 ################################ 水域分割(推理) ##############################
