@@ -19,7 +19,7 @@ class LitModel(pl.LightningModule):
     @staticmethod
     def add_argparse_args(parser):
         """Adds model specific parameters to parser."""
-        parser.add_argument("--learning_rate", type=float, default=LEARNING_RATE, help="Base learning rate for training with polynomial decay.")
+        parser.add_argument("--learning_rate", "--learning-rate", "--lr", type=float, default=LEARNING_RATE, help="Base learning rate for training with polynomial decay.")
         parser.add_argument("--momentum", type=float, default=MOMENTUM, help="Momentum component of the optimiser.")
         parser.add_argument("--epochs", type=int, default=NUM_EPOCHS, help="Number of training epochs.")
         parser.add_argument("--lr_decay_pow", type=float, default=LR_DECAY_POW, help="Decay parameter to compute the learning rate decay.")

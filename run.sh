@@ -98,6 +98,38 @@ python train_water.py `
     --water_class_weight 5.0 `
     --freeze_backbone
 
+#模型训练（pro 版）
+#方式1
+python train_water_val_pro.py `
+    --images D:\Files\Data\IRWSB\train\images `
+    --masks D:\Files\Data\IRWSB\train\masks_white_noSuffix `
+    --val-images D:\Files\Data\IRWSB\val\images `
+    --val-masks D:\Files\Data\IRWSB\val\masks_white_noSuffix `
+    --model wasr_resnet50 `
+    --epochs 10 `
+    --batch-size 4 `
+    --learning-rate 1e-4 `
+    --precision 16 `
+    --model-dir checkpoints/experiment1 `
+    --log-dir logs/experiment1 `
+    --model-name experiment1 `
+    --log-name experiment4 `
+    --save-interval 0 `
+    --water_class_weight 5.0 `
+    --freeze_backbone
+#方式2（兼容原方式）
+python train_water_val_pro.py `
+    --train_config configs/IRWSB_train.yaml `
+    --val_config configs/IRWSB_val.yaml `
+    --model_name water_test_stable `
+    --model wasr_resnet50 `
+    --batch_size 4 `
+    --epochs 10 `
+    --precision 16 `
+    --learning_rate 1e-4 `
+    --model-dir checkpoints/experiment1 `
+    --save-interval 0
+
 ################################ 水域分割(训练诊断) ##############################
 #训练问题诊断
 python debug_training.py
