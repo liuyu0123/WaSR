@@ -67,7 +67,10 @@ class IntervalCheckpoint(Callback):
 
 
 class MetricsCallback(Callback):
-    """自定义回调，实时记录训练和验证指标到CSV（每个epoch追加写入）"""
+    """
+    自定义回调，实时记录训练和验证指标到CSV（每个epoch追加写入）
+    修复：使用 logged_metrics 替代 callback_metrics，确保获取正确的epoch级聚合指标
+    """
     
     def __init__(self, save_path, model_info, args, debug=True):
         super().__init__()
@@ -95,15 +98,21 @@ class MetricsCallback(Callback):
         print(f"Log file initialized: {self.save_path}")
         
     def _get_metric(self, metrics, key_list):
-        """辅助函数：从metrics字典中获取第一个存在的键值"""
+        """
+        辅助函数：从metrics字典中获取第一个存在的键值
+        修复：支持从 logged_metrics 读取，处理 Tensor 和 float
+        """
         for key in key_list:
             if key in metrics:
                 value = metrics[key]
+                # 处理不同类型的值
                 if isinstance(value, torch.Tensor):
                     value = value.item()
-                # 确保值是数字
-                if isinstance(value, (int, float)):
-                    return float(value)
+                elif isinstance(value, (int, float)):
+                    value = float(value)
+                else:
+                    continue
+                return value
         return 0.0
         
     def on_train_epoch_start(self, trainer, pl_module):
@@ -116,40 +125,46 @@ class MetricsCallback(Callback):
         self.val_start_time = time.time()
         
     def on_validation_epoch_end(self, trainer, pl_module):
-        """验证epoch结束时 - 此时所有指标都已聚合完成，立即写入CSV"""
-        metrics = trainer.callback_metrics
+        """
+        验证epoch结束时 - 使用 logged_metrics 确保获取完整epoch的聚合指标
+        注意：此方法在 LitModel.on_validation_epoch_end 之后执行，确保指标已计算完成
+        """
+        # 修复1：使用 logged_metrics 而不是 callback_metrics
+        # logged_metrics 包含当前epoch所有已记录的指标（包括epoch级聚合值）
+        metrics = trainer.logged_metrics if hasattr(trainer, 'logged_metrics') else trainer.callback_metrics
         
         # 调试模式：打印所有可用的指标键（仅第一个epoch）
         if self.debug and self.first_epoch:
-            print(f"\n[DEBUG] Available callback_metrics keys: {sorted(list(metrics.keys()))}")
-            # 也检查 logged_metrics
-            if hasattr(trainer, 'logged_metrics'):
-                print(f"[DEBUG] Available logged_metrics keys: {sorted(list(trainer.logged_metrics.keys()))}")
+            print(f"\n[DEBUG] Available logged_metrics keys: {sorted([k for k in metrics.keys()])}")
+            print(f"[DEBUG] Callback execution order check: MetricsCallback.on_validation_epoch_end triggered")
             self.first_epoch = False
         
         # 计算验证耗时
         if hasattr(self, 'val_start_time'):
             self.epoch_val_time = time.time() - self.val_start_time
         
-        # 获取训练指标 - 尝试多种可能的键名（包括带_epoch后缀和不带的）
+        # 修复2：支持多种可能的键名（包括带_epoch后缀和不带的）
+        # PyTorch Lightning >= 2.0 通常在 logged_metrics 中存储为 'val/precision_epoch'
+        # 但也可能直接为 'val/precision'，取决于 log 的 on_epoch 设置
+        
+        # 获取训练指标（epoch级聚合值）
         train_loss = self._get_metric(metrics, [
-            'train/loss_epoch', 'train/loss', 'loss_epoch', 'loss'
+            'train/loss_epoch', 'train/loss'
         ])
         train_precision = self._get_metric(metrics, [
-            'train/precision_epoch', 'train/precision', 'precision_epoch', 'precision'
+            'train/precision_epoch', 'train/precision'
         ])
         train_recall = self._get_metric(metrics, [
-            'train/recall_epoch', 'train/recall', 'recall_epoch', 'recall'
+            'train/recall_epoch', 'train/recall'
         ])
         train_f1 = self._get_metric(metrics, [
-            'train/f1_epoch', 'train/f1', 'f1_epoch', 'f1'
+            'train/f1_epoch', 'train/f1'
         ])
         train_miou = self._get_metric(metrics, [
-            'train/miou_epoch', 'train/miou', 'train/iou/water_epoch', 'train/iou/water', 
-            'miou_epoch', 'miou', 'iou/water_epoch', 'iou/water'
+            'train/miou_epoch', 'train/miou', 'train/iou/water_epoch', 'train/iou/water'
         ])
         
-        # 获取验证指标
+        # 获取验证指标（epoch级聚合值）
         val_loss = self._get_metric(metrics, [
             'val/loss_epoch', 'val/loss', 'validation/loss_epoch', 'validation/loss'
         ])
@@ -200,6 +215,13 @@ class MetricsCallback(Callback):
         with open(self.save_path, 'a', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=self.header)
             writer.writerow(row)
+        
+        # 修复3：增加指标合理性检查，如果检测到异常抖动给出警告
+        if val_miou > 0 and train_miou > 0:
+            miou_diff = abs(train_miou - val_miou)
+            if miou_diff > 0.3:  # Train和Val差异过大
+                print(f"\n[WARNING] Large gap between Train mIoU ({train_miou:.4f}) and Val mIoU ({val_miou:.4f}) at epoch {trainer.current_epoch + 1}")
+                print(f"          This might indicate metric aggregation issue or overfitting.")
         
         # 打印当前epoch摘要
         print(f"\nEpoch {trainer.current_epoch + 1} Summary:")
@@ -454,12 +476,15 @@ def train_water(args):
             )
             print(f"Validation samples: {len(val_ds)}")
             
+            # 修复：确保验证集shuffle=False且drop_last=False，保证指标稳定性
             val_dl = DataLoader(
                 val_ds, 
                 batch_size=args.batch_size, 
+                shuffle=False,  # 显式设置False，确保验证顺序一致
                 num_workers=args.workers,
                 persistent_workers=args.workers > 0,
-                pin_memory=True
+                pin_memory=True,
+                drop_last=False  # 确保不丢弃最后一个batch，避免验证集大小变化
             )
 
         # 创建模型
@@ -516,17 +541,11 @@ def train_water(args):
         logger = pl_loggers.TensorBoardLogger(log_dir, args.model_name)
         logger.log_hyperparams(vars(args))
 
-        # 创建CSV记录回调（实时写入，启用调试模式）
-        log_filename = f"{args.log_name}.csv"
-        log_save_path = os.path.join(log_dir, log_filename)
-        metrics_callback = MetricsCallback(log_save_path, model_info, args, debug=True)
-        metrics_callback.save_model_info()
-
-        # 回调函数配置
-        callbacks = [metrics_callback]
+        # 创建回调列表（注意顺序很重要）
+        callbacks = []
         
         if args.validation:
-            # 早停
+            # 早停（最先添加）
             if args.patience is not None:
                 callbacks.append(EarlyStopping(
                     monitor=args.monitor_metric, 
@@ -535,7 +554,7 @@ def train_water(args):
                     verbose=True
                 ))
             
-            # 最佳模型保存（自定义命名）
+            # 最佳模型保存
             callbacks.append(ModelCheckpoint(
                 dirpath=model_dir,
                 filename=f"{args.model_name}_best",
@@ -543,17 +562,17 @@ def train_water(args):
                 monitor=args.monitor_metric,
                 mode=args.monitor_metric_mode,
                 verbose=True,
-                save_last=False,  # 我们单独控制last模型保存
+                save_last=False,
             ))
             
-            # 最终模型保存（保存last，使用自定义命名）
+            # 最终模型保存
             callbacks.append(ModelCheckpoint(
                 dirpath=model_dir,
                 filename=f"{args.model_name}_last",
-                monitor=None,  # 不监控，只保存最后
-                save_top_k=0,  # 不基于指标保存
-                every_n_epochs=1,  # 每个epoch都检查（实际只保存最后）
-                save_on_train_epoch_end=True,  # 在训练epoch结束时保存
+                monitor=None,
+                save_top_k=0,
+                every_n_epochs=1,
+                save_on_train_epoch_end=True,
                 verbose=False,
             ))
             
@@ -566,8 +585,16 @@ def train_water(args):
                 ))
                 print(f"分步保存启用: 每 {args.save_interval} 个epoch保存中间模型到 {model_dir}")
             
-            # 模型导出（可选）
+            # 模型导出（可选，在MetricsCallback之前）
             callbacks.append(ModelExporter())
+
+        # 修复：MetricsCallback 最后添加，确保在所有其他回调执行后才记录指标
+        # 这样能保证 LitModel.on_validation_epoch_end 已经执行完毕，指标已正确记录
+        log_filename = f"{args.log_name}.csv"
+        log_save_path = os.path.join(log_dir, log_filename)
+        metrics_callback = MetricsCallback(log_save_path, model_info, args, debug=True)
+        callbacks.append(metrics_callback)
+        metrics_callback.save_model_info()
 
         # 处理设备参数
         if args.gpus == -1:
@@ -620,6 +647,7 @@ def train_water(args):
         print(f"  Best Model:      {args.model_name}_best.ckpt")
         print(f"  Last Model:      {args.model_name}_last.ckpt")
         print(f"Accelerator: {accelerator}, Devices: {devices}, Strategy: {strategy}")
+        print(f"MetricsCallback: 最后执行，确保指标正确聚合")
         print("="*60 + "\n")
         
         trainer.fit(model, train_dl, val_dl)

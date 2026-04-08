@@ -225,27 +225,33 @@ class LitModel(pl.LightningModule):
         out = self.model(features)
         
         loss = focal_loss(out['out'], labels['segmentation'], 
-                          target_scale=self.focal_loss_scale, 
-                          weight=self.class_weights)
+                        target_scale=self.focal_loss_scale, 
+                        weight=self.class_weights)
         
-        self.log('val/loss', loss.item())
+        # 关键修复：使用 sync_dist=True 确保分布式同步，并明确 on_epoch=True
+        self.log('val/loss', loss, on_epoch=True, sync_dist=True, prog_bar=True)
 
         # 计算并记录验证指标
         self._compute_metrics(out['out'], labels['segmentation'], stage='val')
         
         return {'loss': loss}
-    
+
     def on_validation_epoch_end(self):
         """验证epoch结束时，计算并记录 Precision, Recall, F1"""
         metrics = self._compute_metrics_from_cm('val')
         
-        self.log('val/precision', metrics['precision'], on_epoch=True)
-        self.log('val/recall', metrics['recall'], on_epoch=True)
-        self.log('val/f1', metrics['f1'], on_epoch=True)
-        self.log('val/miou', metrics['miou'], on_epoch=True)
+        # 关键修复：确保在epoch结束时记录，使用 sync_dist
+        self.log('val/precision', metrics['precision'], on_epoch=True, sync_dist=True)
+        self.log('val/recall', metrics['recall'], on_epoch=True, sync_dist=True)
+        self.log('val/f1', metrics['f1'], on_epoch=True, sync_dist=True)
+        self.log('val/miou', metrics['miou'], on_epoch=True, sync_dist=True)
         
         # 重置混淆矩阵
         self._reset_confusion_matrix('val')
+        
+        # 可选：打印当前epoch的混淆矩阵用于调试
+        if self.trainer.is_global_zero:  # 只在主进程打印
+            print(f"\n[DEBUG] Epoch {self.current_epoch} Val Confusion Matrix:\n{self.val_confusion_matrix}")
 
     def configure_optimizers(self):
         # Separate parameters for different LRs

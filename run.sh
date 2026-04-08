@@ -100,6 +100,7 @@ python train_water.py `
 
 #模型训练（pro 版）
 #方式1
+# patience 参数表示多少轮验证集的指标没有提升就停止训练
 python train_water_val_pro.py `
     --images D:\Files\Data\IRWSB\train\images `
     --masks D:\Files\Data\IRWSB\train\masks_white_noSuffix `
@@ -113,10 +114,12 @@ python train_water_val_pro.py `
     --model-dir checkpoints/experiment1 `
     --log-dir logs/experiment1 `
     --model-name experiment1 `
-    --log-name experiment4 `
+    --log-name experiment1 `
     --save-interval 0 `
     --water_class_weight 5.0 `
-    --freeze_backbone
+    --freeze_backbone `
+    --patience 150
+
 #方式2（兼容原方式）
 python train_water_val_pro.py `
     --train_config configs/IRWSB_train.yaml `
