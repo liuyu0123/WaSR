@@ -171,6 +171,29 @@ python predict_water.py `
     --num_classes 2 `
     --fp16
 
+#模型推理pro版（生成红色mask蒙版和csv评价指标）
+# 单张图片推理 + 保存叠加结果
+python predict_water_pro.py `
+    --architecture wasr_resnet50 `
+    --input ./test.jpg `
+    --weights ./model.pth `
+    --output ./output/predictions_pro
+
+# 文件夹批量推理 + 真值评估（保存CSV）
+python predict_water_pro.py `
+    --architecture wasr_resnet50 `
+    --input "D:\Files\Data\IRWSB\analyse\images" `
+    --weights "F:\AAA\10_wasr_best\experiment1\weights.pth" `
+    --gt_mask_dir "D:\Files\Data\IRWSB\analyse\masks_white_noSuffix" `
+    --output ./output/predictions_pro
+
+# 仅评估不打分（终端打印报告）
+python predict_water_pro.py `
+    --architecture wasr_resnet50 `
+    --input "D:\Files\Data\IRWSB\analyse\images" `
+    --weights output_water/logs/water_test_stable/version_0/weights.pth `
+    --gt_mask_dir "D:\Files\Data\IRWSB\analyse\masks_white_noSuffix"
+
 
 ################################ 水域分割(推理诊断) ##############################
 #模型预测数据检查
