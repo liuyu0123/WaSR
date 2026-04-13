@@ -180,12 +180,14 @@ python predict_water_pro.py `
     --output ./output/predictions_pro
 
 # 文件夹批量推理 + 真值评估（保存CSV）
+# batch_size 设为1，否则所有推理速度相同，fps值完全一致。
 python predict_water_pro.py `
     --architecture wasr_resnet50 `
     --input "D:\Files\Data\IRWSB\analyse\images" `
     --weights "F:\AAA\10_wasr_best\experiment1\weights.pth" `
     --gt_mask_dir "D:\Files\Data\IRWSB\analyse\masks_white_noSuffix" `
-    --output ./output/predictions_pro
+    --output ./output/predictions_pro `
+    --batch_size 1
 
 # 仅评估不打分（终端打印报告）
 python predict_water_pro.py `

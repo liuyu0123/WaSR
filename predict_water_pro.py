@@ -1,5 +1,6 @@
 import argparse
 import os
+import time
 from pathlib import Path
 import numpy as np
 from PIL import Image
@@ -132,11 +133,13 @@ def calculate_metrics(pred_mask, gt_mask):
     
     return {
         'image_name': '',  # 稍后填充
-        'precision': precision, 
-        'recall': recall, 
+        'precision': precision,
+        'recall': recall,
         'f1_score': f1,
-        'miou': iou, 
+        'miou': iou,
         'accuracy': accuracy,
+        'inference_time': 0.0,
+        'fps': 0.0,
         '_tp': int(tp), '_fp': int(fp), '_fn': int(fn), '_tn': int(tn)  # 内部字段，不计入CSV
     }
 
@@ -194,15 +197,19 @@ def load_gt_mask(gt_path, pred_shape):
         return None
 
 
-def export_predictions(preds, batch, args, all_metrics, batch_idx=0):
+def export_predictions(preds, batch, args, all_metrics, batch_idx=0, inference_time=0.0):
     """处理预测结果"""
     features, metadata = batch
     batch_metrics = []
-    
+
     output_dir = Path(args.output) if args.output else None
     gt_dir = Path(args.gt_mask_dir) if args.gt_mask_dir else None
     input_path = Path(args.input).resolve()
-    
+
+    num_images = len(preds)
+    per_image_time = inference_time / num_images if num_images > 0 else 0.0
+    fps = 1.0 / per_image_time if per_image_time > 0 else 0.0
+
     for i, pred_mask in enumerate(preds):
         img_path_str = metadata['image_path'][i]
         img_path = Path(img_path_str)
@@ -234,6 +241,8 @@ def export_predictions(preds, batch, args, all_metrics, batch_idx=0):
                 if gt_mask is not None:
                     metrics = calculate_metrics(pred_mask, gt_mask)
                     metrics['image_name'] = img_name
+                    metrics['inference_time'] = per_image_time
+                    metrics['fps'] = fps
                     batch_metrics.append(metrics)
         
         if output_dir:
@@ -262,8 +271,8 @@ def generate_report(all_metrics, output_path=None):
         print("No metrics collected.")
         return
     
-    fieldnames = ['image_name', 'precision', 'recall', 'f1_score', 'miou', 'accuracy']
-    
+    fieldnames = ['image_name', 'precision', 'recall', 'f1_score', 'miou', 'accuracy', 'inference_time', 'fps']
+
     # 计算平均值
     avg_metrics = {
         'image_name': 'AVERAGE',
@@ -271,7 +280,9 @@ def generate_report(all_metrics, output_path=None):
         'recall': np.mean([m['recall'] for m in all_metrics]),
         'f1_score': np.mean([m['f1_score'] for m in all_metrics]),
         'miou': np.mean([m['miou'] for m in all_metrics]),
-        'accuracy': np.mean([m['accuracy'] for m in all_metrics])
+        'accuracy': np.mean([m['accuracy'] for m in all_metrics]),
+        'inference_time': np.mean([m['inference_time'] for m in all_metrics]),
+        'fps': np.mean([m['fps'] for m in all_metrics])
     }
     
     # 过滤数据：只保留 fieldnames 中的字段，排除 _tp/_fp 等内部字段
@@ -290,16 +301,16 @@ def generate_report(all_metrics, output_path=None):
             writer.writerows(report_data)
         
         print(f"\nReport saved: {csv_path}")
-        print(f"Images: {len(all_metrics)} | Precision: {avg_metrics['precision']:.4f} | Recall: {avg_metrics['recall']:.4f} | F1: {avg_metrics['f1_score']:.4f} | mIoU: {avg_metrics['miou']:.4f}")
+        print(f"Images: {len(all_metrics)} | Precision: {avg_metrics['precision']:.4f} | Recall: {avg_metrics['recall']:.4f} | F1: {avg_metrics['f1_score']:.4f} | mIoU: {avg_metrics['miou']:.4f} | Time: {avg_metrics['inference_time']:.4f}s | FPS: {avg_metrics['fps']:.2f}")
     else:
-        print("\n" + "="*85)
-        print(f"{'Image':<35} {'Precision':>9} {'Recall':>9} {'F1':>9} {'mIoU':>9} {'Acc':>9}")
-        print("-"*85)
+        print("\n" + "="*105)
+        print(f"{'Image':<35} {'Precision':>9} {'Recall':>9} {'F1':>9} {'mIoU':>9} {'Acc':>9} {'Time(s)':>9} {'FPS':>9}")
+        print("-"*105)
         for m in all_metrics:
-            print(f"{m['image_name']:<35} {m['precision']:>9.4f} {m['recall']:>9.4f} {m['f1_score']:>9.4f} {m['miou']:>9.4f} {m['accuracy']:>9.4f}")
-        print("-"*85)
-        print(f"{'AVERAGE':<35} {avg_metrics['precision']:>9.4f} {avg_metrics['recall']:>9.4f} {avg_metrics['f1_score']:>9.4f} {avg_metrics['miou']:>9.4f} {avg_metrics['accuracy']:>9.4f}")
-        print("="*85)
+            print(f"{m['image_name']:<35} {m['precision']:>9.4f} {m['recall']:>9.4f} {m['f1_score']:>9.4f} {m['miou']:>9.4f} {m['accuracy']:>9.4f} {m['inference_time']:>9.4f} {m['fps']:>9.2f}")
+        print("-"*105)
+        print(f"{'AVERAGE':<35} {avg_metrics['precision']:>9.4f} {avg_metrics['recall']:>9.4f} {avg_metrics['f1_score']:>9.4f} {avg_metrics['miou']:>9.4f} {avg_metrics['accuracy']:>9.4f} {avg_metrics['inference_time']:>9.4f} {avg_metrics['fps']:>9.2f}")
+        print("="*105)
 
 
 def predict(args):
@@ -327,12 +338,30 @@ def predict(args):
         Path(args.output).mkdir(parents=True, exist_ok=True)
         print(f"Output: {args.output}")
     
+    # Warm-up 一次，排除 CUDA/模型初始化等杂项时间对首帧的影响
+    print("Warming up...")
+    dl_iter = iter(dl)
+    try:
+        first_batch = next(dl_iter)
+        features, _ = first_batch
+        _ = predictor.predict_batch(features)
+    except StopIteration:
+        pass
+
     all_metrics = []
     print("Starting prediction...")
     for batch_idx, batch in enumerate(tqdm(iter(dl), total=len(dl))):
         features, _ = batch
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        start_time = time.time()
         pred_masks = predictor.predict_batch(features)
-        batch_metrics = export_predictions(pred_masks, batch, args, all_metrics, batch_idx)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        inference_time = time.time() - start_time
+
+        batch_metrics = export_predictions(pred_masks, batch, args, all_metrics, batch_idx, inference_time)
         all_metrics.extend(batch_metrics)
     
     print(f"\nProcessed {len(all_metrics)} images successfully.")
