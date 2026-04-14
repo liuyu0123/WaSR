@@ -18,7 +18,13 @@ class FolderDataset(torch.utils.data.Dataset):
         """
 
         self.image_dir = Path(image_dir)
-        self.images = sorted([p.relative_to(image_dir) for p in Path(image_dir).glob('**/*.jpg')])
+        # self.images = sorted([p.relative_to(image_dir) for p in Path(image_dir).glob('**/*.jpg')])
+        # 修改后（支持 jpg、jpeg、png 等）：
+        image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tif', '*.tiff']
+        self.images = []
+        for ext in image_extensions:
+            self.images.extend(Path(image_dir).glob(f'**/{ext}'))
+        self.images = sorted([p.relative_to(image_dir) for p in self.images])
         self.imus = None
         self.imu_dir = None
         if imu_dir is not None:

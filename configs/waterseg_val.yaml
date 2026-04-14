@@ -1,0 +1,3 @@
+image_dir: D:\Files\GitProject\BiSeNet-ooooverflow-LY\dataset\water_seg\val\images
+# mask_dir: D:\Files\GitProject\BiSeNet-ooooverflow-LY\dataset\water_seg\val\masks
+mask_dir: D:\Files\GitProject\BiSeNet-ooooverflow-LY\dataset\water_seg2\val\masks
